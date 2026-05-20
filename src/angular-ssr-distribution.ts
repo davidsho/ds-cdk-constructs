@@ -87,6 +87,8 @@ export class AngularSsrDistribution extends Construct {
     public readonly distributionIdOutput: cdk.CfnOutput;
     public readonly ssrFunction: lambda.Function;
     public readonly assetsBucket: s3.Bucket;
+    public readonly responseHeadersPolicy: cloudfront.ResponseHeadersPolicy;
+    public readonly viewerRequestFunction: cloudfront.Function;
 
     constructor(scope: Construct, id: string, props: AngularSsrDistributionProps) {
         super(scope, id);
@@ -148,7 +150,7 @@ export class AngularSsrDistribution extends Construct {
             authType: lambda.FunctionUrlAuthType.AWS_IAM,
         });
 
-        const responseHeadersPolicy = new cloudfront.ResponseHeadersPolicy(
+        this.responseHeadersPolicy = new cloudfront.ResponseHeadersPolicy(
             this,
             'SecurityHeadersPolicy',
             {
@@ -208,7 +210,7 @@ export class AngularSsrDistribution extends Construct {
             enableAcceptEncodingBrotli: true,
         });
 
-        const viewerRequestFunction = new cloudfront.Function(this, 'ViewerRequestFunction', {
+        this.viewerRequestFunction = new cloudfront.Function(this, 'ViewerRequestFunction', {
             runtime: cloudfront.FunctionRuntime.JS_2_0,
             comment: aliasesEnabled
                 ? `Inject x-forwarded-host; redirect www.${domainName} to apex`
@@ -254,7 +256,7 @@ export class AngularSsrDistribution extends Construct {
         });
 
         const functionAssociations: cloudfront.FunctionAssociation[] = [{
-            function: viewerRequestFunction,
+            function: this.viewerRequestFunction,
             eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
         }];
 
@@ -262,7 +264,7 @@ export class AngularSsrDistribution extends Construct {
             origin: s3Origin,
             viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
             cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
-            responseHeadersPolicy,
+            responseHeadersPolicy: this.responseHeadersPolicy,
             functionAssociations,
         };
 
@@ -283,7 +285,7 @@ export class AngularSsrDistribution extends Construct {
                 originRequestPolicy:
                     cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
                 allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
-                responseHeadersPolicy,
+                responseHeadersPolicy: this.responseHeadersPolicy,
                 functionAssociations,
             },
             additionalBehaviors: {
