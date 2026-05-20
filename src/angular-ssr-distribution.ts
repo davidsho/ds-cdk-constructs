@@ -11,8 +11,7 @@ import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import {Construct} from 'constructs';
 
 // Bump this when AWS releases a new Lambda Web Adapter version.
-const WEB_ADAPTER_LAYER_ARM64 =
-    'arn:aws:lambda:{region}:753240598075:layer:LambdaAdapterLayerArm64:25';
+const DEFAULT_WEB_ADAPTER_LAYER_VERSION = 25;
 
 const DEFAULT_STATIC_PATTERNS = [
     '*.js', '*.css', '*.svg', '*.png', '*.jpg', '*.webp',
@@ -34,6 +33,14 @@ export interface AngularSsrDistributionProps {
     lambdaMemorySize?: number;
 
     /**
+     * Full ARN of the Lambda Web Adapter layer attached to the SSR function.
+     * Defaults to AWS's published Arm64 adapter layer (account 753240598075,
+     * version 25) in the stack's region. Override to pin a different version
+     * or to use a custom-built layer.
+     */
+    webAdapterLayerArn?: string;
+
+    /**
      * All three must be provided together to enable a custom domain + HTTPS.
      * Omit all three to serve from the default CloudFront URL only.
      */
@@ -42,19 +49,23 @@ export interface AngularSsrDistributionProps {
     hostedZone?: route53.IHostedZone;
     /**
      * Additional aliases on the same certificate (e.g. a members subdomain).
-     * A Route 53 A record is created for each one.
+     * A Route 53 A record is created for each one. These names must also be
+     * present in the ACM certificate's subjectAlternativeNames; the construct
+     * does not modify the certificate.
      */
     additionalDomainNames?: string[];
 
     /**
      * CloudFront cache policy name. Must be unique within the AWS account
      * (CloudFront policies are account-global, not per-stack).
+     * Defaults to `${stack.stackName}-${id}-Cache`.
      */
-    cachePolicyName: string;
+    cachePolicyName?: string;
     /**
      * CloudFront response headers policy name. Same uniqueness constraint.
+     * Defaults to `${stack.stackName}-${id}-SecurityHeaders`.
      */
-    securityHeadersPolicyName: string;
+    securityHeadersPolicyName?: string;
 
     /** Fully-assembled CSP string. Build it in the consuming stack. */
     contentSecurityPolicy: string;
@@ -74,6 +85,8 @@ export interface AngularSsrDistributionProps {
 export class AngularSsrDistribution extends Construct {
     public readonly distribution: cloudfront.Distribution;
     public readonly distributionIdOutput: cdk.CfnOutput;
+    public readonly ssrFunction: lambda.Function;
+    public readonly assetsBucket: s3.Bucket;
 
     constructor(scope: Construct, id: string, props: AngularSsrDistributionProps) {
         super(scope, id);
@@ -83,6 +96,7 @@ export class AngularSsrDistribution extends Construct {
             browserDistPath,
             lambdaEnv = {},
             lambdaMemorySize = 512,
+            webAdapterLayerArn,
             domainName,
             certificate,
             hostedZone,
@@ -97,13 +111,18 @@ export class AngularSsrDistribution extends Construct {
         const stack = cdk.Stack.of(this);
         const aliasesEnabled = !!(domainName && certificate && hostedZone);
 
-        const assetsBucket = new s3.Bucket(this, 'AssetsBucket', {
+        const resolvedCachePolicyName = cachePolicyName ?? `${stack.stackName}-${id}-Cache`;
+        const resolvedHeadersPolicyName = securityHeadersPolicyName ?? `${stack.stackName}-${id}-SecurityHeaders`;
+        const resolvedLayerArn = webAdapterLayerArn
+            ?? `arn:aws:lambda:${stack.region}:753240598075:layer:LambdaAdapterLayerArm64:${DEFAULT_WEB_ADAPTER_LAYER_VERSION}`;
+
+        this.assetsBucket = new s3.Bucket(this, 'AssetsBucket', {
             removalPolicy: cdk.RemovalPolicy.DESTROY,
             autoDeleteObjects: true,
             blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
         });
 
-        const ssrFunction = new lambda.Function(this, 'SsrFunction', {
+        this.ssrFunction = new lambda.Function(this, 'SsrFunction', {
             runtime: lambda.Runtime.NODEJS_22_X,
             handler: 'run.sh',
             code: lambda.Code.fromAsset(serverDistPath),
@@ -120,12 +139,12 @@ export class AngularSsrDistribution extends Construct {
                 lambda.LayerVersion.fromLayerVersionArn(
                     this,
                     'WebAdapterLayer',
-                    WEB_ADAPTER_LAYER_ARM64.replace('{region}', stack.region),
+                    resolvedLayerArn,
                 ),
             ],
         });
 
-        const functionUrl = ssrFunction.addFunctionUrl({
+        const functionUrl = this.ssrFunction.addFunctionUrl({
             authType: lambda.FunctionUrlAuthType.AWS_IAM,
         });
 
@@ -133,7 +152,7 @@ export class AngularSsrDistribution extends Construct {
             this,
             'SecurityHeadersPolicy',
             {
-                responseHeadersPolicyName: securityHeadersPolicyName,
+                responseHeadersPolicyName: resolvedHeadersPolicyName,
                 securityHeadersBehavior: {
                     strictTransportSecurity: {
                         accessControlMaxAge: cdk.Duration.days(365),
@@ -173,11 +192,11 @@ export class AngularSsrDistribution extends Construct {
             },
         );
 
-        const s3Origin = origins.S3BucketOrigin.withOriginAccessControl(assetsBucket);
+        const s3Origin = origins.S3BucketOrigin.withOriginAccessControl(this.assetsBucket);
         const lambdaOrigin = origins.FunctionUrlOrigin.withOriginAccessControl(functionUrl);
 
         const ssrCachePolicy = new cloudfront.CachePolicy(this, 'SsrCachePolicy', {
-            cachePolicyName,
+            cachePolicyName: resolvedCachePolicyName,
             comment: 'SSR HTML cache, driven by origin Cache-Control headers',
             defaultTtl: cdk.Duration.seconds(0),
             minTtl: cdk.Duration.seconds(0),
@@ -279,7 +298,7 @@ export class AngularSsrDistribution extends Construct {
         // CDK's FunctionUrlOrigin.withOriginAccessControl() only grants
         // lambda:InvokeFunctionUrl. Since AWS's October 2025 change, OAC also
         // needs lambda:InvokeFunction or every request 403s. Remove when CDK fixes this.
-        ssrFunction.addPermission('InvokeFunctionForCloudFrontOac', {
+        this.ssrFunction.addPermission('InvokeFunctionForCloudFrontOac', {
             principal: new iam.ServicePrincipal('cloudfront.amazonaws.com'),
             action: 'lambda:InvokeFunction',
             sourceArn: `arn:aws:cloudfront::${stack.account}:distribution/${this.distribution.distributionId}`,
@@ -319,7 +338,7 @@ export class AngularSsrDistribution extends Construct {
 
         new s3deploy.BucketDeployment(this, 'DeployHashedAssets', {
             sources: [browserAssetsSource],
-            destinationBucket: assetsBucket,
+            destinationBucket: this.assetsBucket,
             cacheControl: [
                 s3deploy.CacheControl.fromString('public, max-age=31536000, immutable'),
             ],
@@ -329,7 +348,7 @@ export class AngularSsrDistribution extends Construct {
 
         new s3deploy.BucketDeployment(this, 'DeployUnhashedAssets', {
             sources: [browserAssetsSource],
-            destinationBucket: assetsBucket,
+            destinationBucket: this.assetsBucket,
             cacheControl: [
                 s3deploy.CacheControl.fromString('public, max-age=86400, must-revalidate'),
             ],
