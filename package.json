@@ -1,6 +1,6 @@
 {
   "name": "@davidsho/cdk-constructs",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Shared CDK L3 constructs for Angular SSR deployments on AWS",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

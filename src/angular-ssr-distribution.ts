@@ -73,6 +73,11 @@ export interface AngularSsrDistributionProps {
     /**
      * Extra CloudFront behaviors added before the static asset catch-alls.
      * Use this for API paths, e.g. `{ 'api/*': apiBehavior }`.
+     *
+     * The construct's default `responseHeadersPolicy` (security headers + CSP)
+     * and viewer-request `functionAssociations` (x-forwarded-host injection,
+     * www→apex redirect) are applied to each entry unless the caller sets
+     * those fields explicitly.
      */
     additionalBehaviors?: Record<string, cloudfront.BehaviorOptions>;
     /**
@@ -289,7 +294,16 @@ export class AngularSsrDistribution extends Construct {
                 functionAssociations,
             },
             additionalBehaviors: {
-                ...additionalBehaviors,
+                ...Object.fromEntries(
+                    Object.entries(additionalBehaviors).map(([pattern, behavior]) => [
+                        pattern,
+                        {
+                            responseHeadersPolicy: this.responseHeadersPolicy,
+                            functionAssociations,
+                            ...behavior,
+                        },
+                    ]),
+                ),
                 ...staticBehaviors,
             },
             httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
