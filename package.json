@@ -1,0 +1,26 @@
+{
+  "name": "@davidsho/cdk-constructs",
+  "version": "1.0.0",
+  "description": "Shared CDK L3 constructs for Angular SSR deployments on AWS",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "files": [
+    "lib"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "peerDependencies": {
+    "aws-cdk-lib": "^2.243.0",
+    "constructs": "^10.5.1"
+  },
+  "devDependencies": {
+    "aws-cdk-lib": "~2.253.0",
+    "constructs": "^10.5.1",
+    "typescript": "~5.9.3"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  }
+}
