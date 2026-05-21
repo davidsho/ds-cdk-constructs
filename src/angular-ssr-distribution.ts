@@ -9,8 +9,8 @@ import * as route53Targets from 'aws-cdk-lib/aws-route53-targets';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import {Construct} from 'constructs';
+import {hostHeaderCode, hostHeaderWithWwwRedirectCode} from './viewer-request';
 
-// Bump this when AWS releases a new Lambda Web Adapter version.
 const DEFAULT_WEB_ADAPTER_LAYER_VERSION = 25;
 
 const DEFAULT_STATIC_PATTERNS = [
@@ -19,9 +19,7 @@ const DEFAULT_STATIC_PATTERNS = [
 ];
 
 export interface AngularSsrDistributionProps {
-    /** Absolute path to the `server/` output from `ng build`. */
     serverDistPath: string;
-    /** Absolute path to the `browser/` output from `ng build`. */
     browserDistPath: string;
 
     /**
@@ -29,7 +27,6 @@ export interface AngularSsrDistributionProps {
      * AWS_LAMBDA_EXEC_WRAPPER, PORT, and NODE_ENV are already set.
      */
     lambdaEnv?: Record<string, string>;
-    /** Defaults to 512. */
     lambdaMemorySize?: number;
 
     /**
@@ -85,6 +82,12 @@ export interface AngularSsrDistributionProps {
      * Defaults: *.js *.css *.svg *.png *.jpg *.webp *.woff2 site.webmanifest
      */
     additionalStaticPatterns?: string[];
+
+    /**
+     * CloudFront price class. Controls which edge locations serve your content.
+     * Defaults to `PRICE_CLASS_100` (North America and Europe).
+     */
+    priceClass?: cloudfront.PriceClass;
 }
 
 export class AngularSsrDistribution extends Construct {
@@ -113,9 +116,16 @@ export class AngularSsrDistribution extends Construct {
             contentSecurityPolicy,
             additionalBehaviors = {},
             additionalStaticPatterns = [],
+            priceClass = cloudfront.PriceClass.PRICE_CLASS_100,
         } = props;
 
         const stack = cdk.Stack.of(this);
+
+        const domainPropsProvided = [domainName, certificate, hostedZone].filter(Boolean).length;
+        if (domainPropsProvided > 0 && domainPropsProvided < 3) {
+            throw new Error('domainName, certificate, and hostedZone must all be provided together, or all omitted');
+        }
+
         const aliasesEnabled = !!(domainName && certificate && hostedZone);
 
         const resolvedCachePolicyName = cachePolicyName ?? `${stack.stackName}-${id}-Cache`;
@@ -221,43 +231,8 @@ export class AngularSsrDistribution extends Construct {
                 ? `Inject x-forwarded-host; redirect www.${domainName} to apex`
                 : 'Inject x-forwarded-host for SSR base URL detection',
             code: aliasesEnabled
-                ? cloudfront.FunctionCode.fromInline(`
-                    function handler(event) {
-                        var request = event.request;
-                        var host = request.headers.host.value;
-                        request.headers['x-forwarded-host'] = { value: host };
-                        if (host.toLowerCase() === 'www.${domainName}') {
-                            var qsParts = [];
-                            for (var key in request.querystring) {
-                                var qs = request.querystring[key];
-                                if (qs && qs.multiValue) {
-                                    for (var i = 0; i < qs.multiValue.length; i++) {
-                                        qsParts.push(key + '=' + qs.multiValue[i].value);
-                                    }
-                                } else if (qs && qs.value !== undefined) {
-                                    qsParts.push(key + '=' + qs.value);
-                                }
-                            }
-                            var querystring = qsParts.length > 0 ? '?' + qsParts.join('&') : '';
-                            return {
-                                statusCode: 301,
-                                statusDescription: 'Moved Permanently',
-                                headers: {
-                                    'location': { value: 'https://${domainName}' + request.uri + querystring },
-                                    'cache-control': { value: 'max-age=31536000' }
-                                }
-                            };
-                        }
-                        return request;
-                    }
-                `)
-                : cloudfront.FunctionCode.fromInline(`
-                    function handler(event) {
-                        var request = event.request;
-                        request.headers['x-forwarded-host'] = { value: request.headers.host.value };
-                        return request;
-                    }
-                `),
+                ? hostHeaderWithWwwRedirectCode(domainName!)
+                : hostHeaderCode(),
         });
 
         const functionAssociations: cloudfront.FunctionAssociation[] = [{
@@ -282,6 +257,13 @@ export class AngularSsrDistribution extends Construct {
             ? [domainName!, `www.${domainName}`, ...additionalDomainNames]
             : undefined;
 
+        const resolvedAdditionalBehaviors = Object.fromEntries(
+            Object.entries(additionalBehaviors).map(([pattern, behavior]) => [
+                pattern,
+                {responseHeadersPolicy: this.responseHeadersPolicy, functionAssociations, ...behavior},
+            ]),
+        );
+
         this.distribution = new cloudfront.Distribution(this, 'Distribution', {
             defaultBehavior: {
                 origin: lambdaOrigin,
@@ -294,20 +276,11 @@ export class AngularSsrDistribution extends Construct {
                 functionAssociations,
             },
             additionalBehaviors: {
-                ...Object.fromEntries(
-                    Object.entries(additionalBehaviors).map(([pattern, behavior]) => [
-                        pattern,
-                        {
-                            responseHeadersPolicy: this.responseHeadersPolicy,
-                            functionAssociations,
-                            ...behavior,
-                        },
-                    ]),
-                ),
+                ...resolvedAdditionalBehaviors,
                 ...staticBehaviors,
             },
             httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
-            priceClass: cloudfront.PriceClass.PRICE_CLASS_100,
+            priceClass,
             ...(aliasDomains ? {domainNames: aliasDomains, certificate} : {}),
         });
 
