@@ -2,8 +2,11 @@
 
 L3 CDK constructs for Angular SSR deployments on AWS.
 
+See [CHANGELOG.md](./CHANGELOG.md) for release notes.
+
 ## Requirements
 
+- Node.js >= 18
 - `aws-cdk-lib` >= 2.243.0
 - `constructs` >= 10.5.1
 
@@ -79,6 +82,10 @@ new AngularSsrDistribution(this, 'Ssr', {
 
 `additionalBehaviors` is merged in before the static-asset catch-alls, so `api/*` always wins over `*.js` and friends.
 
+### Removal policy
+
+The S3 assets bucket defaults to `RemovalPolicy.DESTROY` with `autoDeleteObjects: true`, because the contents are regenerated on every deploy. If you want the bucket (and its objects) to survive stack deletion, pass `bucketRemovalPolicy: cdk.RemovalPolicy.RETAIN`.
+
 ### Extending the SSR Lambda or assets bucket
 
 `ssrFunction` and `assetsBucket` are exposed as public readonly properties. Use them to grant extra permissions, add extra deployments, or attach further integrations:
@@ -96,14 +103,14 @@ new s3deploy.BucketDeployment(this, 'ExtraAssets', {
 
 ## `invalidateCdnStep`
 
-Helper for CodePipeline post-deploy invalidation:
+Helper for CodePipeline post-deploy invalidation. Accepts either an `AngularSsrDistribution` directly, or the `distributionIdOutput` `CfnOutput` it exposes:
 
 ```ts
 import {invalidateCdnStep} from '@davidsho/cdk-constructs';
 
 pipeline.addStage(stage, {
-    post: [invalidateCdnStep(stage.webStack.distributionIdOutput)],
+    post: [invalidateCdnStep(stage.webStack.ssr)],
+    // or, equivalently:
+    // post: [invalidateCdnStep(stage.webStack.ssr.distributionIdOutput)],
 });
 ```
-
-The step expects the distribution id to be available as a `CfnOutput` produced by `AngularSsrDistribution` (`distributionIdOutput`).

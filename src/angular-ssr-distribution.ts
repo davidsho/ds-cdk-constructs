@@ -18,6 +18,8 @@ const DEFAULT_STATIC_PATTERNS = [
     '*.woff2', 'site.webmanifest',
 ];
 
+const DEFAULT_PERMISSIONS_POLICY = 'camera=(), microphone=(), geolocation=()';
+
 export interface AngularSsrDistributionProps {
     serverDistPath: string;
     browserDistPath: string;
@@ -29,11 +31,24 @@ export interface AngularSsrDistributionProps {
     lambdaEnv?: Record<string, string>;
     lambdaMemorySize?: number;
 
+    /** Node.js runtime for the SSR Lambda. Defaults to NODEJS_22_X. */
+    lambdaRuntime?: lambda.Runtime;
+
+    /** Timeout for the SSR Lambda. Defaults to 30 seconds. */
+    lambdaTimeout?: cdk.Duration;
+
+    /**
+     * CPU architecture for the SSR Lambda. Defaults to ARM_64.
+     * The Lambda Web Adapter layer ARN is automatically selected to match —
+     * override `webAdapterLayerArn` only if you supply a custom-built layer.
+     */
+    lambdaArchitecture?: lambda.Architecture;
+
     /**
      * Full ARN of the Lambda Web Adapter layer attached to the SSR function.
-     * Defaults to AWS's published Arm64 adapter layer (account 753240598075,
-     * version 25) in the stack's region. Override to pin a different version
-     * or to use a custom-built layer.
+     * Defaults to AWS's published adapter layer (account 753240598075,
+     * version 25) for the stack's region and `lambdaArchitecture`.
+     * Override to pin a different version or use a custom-built layer.
      */
     webAdapterLayerArn?: string;
 
@@ -44,6 +59,15 @@ export interface AngularSsrDistributionProps {
     domainName?: string;
     certificate?: acm.ICertificate;
     hostedZone?: route53.IHostedZone;
+
+    /**
+     * When true (default), www.<domainName> is added as a CloudFront alias,
+     * a Route 53 A record is created for it, and a 301 redirect sends www
+     * visitors to the apex domain. Set to false to omit www entirely.
+     * Has no effect when domainName is not provided.
+     */
+    redirectWwwToApex?: boolean;
+
     /**
      * Additional aliases on the same certificate (e.g. a members subdomain).
      * A Route 53 A record is created for each one. These names must also be
@@ -58,6 +82,7 @@ export interface AngularSsrDistributionProps {
      * Defaults to `${stack.stackName}-${id}-Cache`.
      */
     cachePolicyName?: string;
+
     /**
      * CloudFront response headers policy name. Same uniqueness constraint.
      * Defaults to `${stack.stackName}-${id}-SecurityHeaders`.
@@ -66,6 +91,36 @@ export interface AngularSsrDistributionProps {
 
     /** Fully-assembled CSP string. Build it in the consuming stack. */
     contentSecurityPolicy: string;
+
+    /**
+     * Value for the Permissions-Policy response header.
+     * Defaults to 'camera=(), microphone=(), geolocation=()'.
+     * Pass an empty string to omit the header entirely.
+     */
+    permissionsPolicy?: string;
+
+    /**
+     * X-Frame-Options header value. Defaults to DENY.
+     * Set to SAMEORIGIN if your app embeds itself in an iframe on the same origin.
+     */
+    frameOption?: cloudfront.HeadersFrameOption;
+
+    /**
+     * HTTP methods CloudFront forwards to the SSR Lambda on the default behavior.
+     * Defaults to ALLOW_ALL so POST and other verbs reach the Lambda.
+     * Restrict to ALLOW_GET_HEAD_OPTIONS if your app never handles mutations
+     * at the SSR layer.
+     */
+    allowedMethods?: cloudfront.AllowedMethods;
+
+    /**
+     * When true (default), query strings are included in the CloudFront cache
+     * key and forwarded to the Lambda, so /search?q=yoga and /search?q=pilates
+     * are cached separately. Set to false only if your app never varies content
+     * by query string — this avoids cache fragmentation from UTM parameters and
+     * other tracking suffixes.
+     */
+    cacheQueryStrings?: boolean;
 
     /**
      * Extra CloudFront behaviors added before the static asset catch-alls.
@@ -77,6 +132,7 @@ export interface AngularSsrDistributionProps {
      * those fields explicitly.
      */
     additionalBehaviors?: Record<string, cloudfront.BehaviorOptions>;
+
     /**
      * Extra file patterns routed to S3 (static behavior) beyond the defaults.
      * Defaults: *.js *.css *.svg *.png *.jpg *.webp *.woff2 site.webmanifest
@@ -85,9 +141,16 @@ export interface AngularSsrDistributionProps {
 
     /**
      * CloudFront price class. Controls which edge locations serve your content.
-     * Defaults to `PRICE_CLASS_100` (North America and Europe).
+     * Defaults to PRICE_CLASS_100 (North America and Europe).
      */
     priceClass?: cloudfront.PriceClass;
+
+    /**
+     * Removal policy for the S3 assets bucket.
+     * Defaults to DESTROY (with autoDeleteObjects) so the bucket is cleaned up
+     * when the stack is deleted. Set to RETAIN to preserve assets on deletion.
+     */
+    bucketRemovalPolicy?: cdk.RemovalPolicy;
 }
 
 export class AngularSsrDistribution extends Construct {
@@ -98,6 +161,10 @@ export class AngularSsrDistribution extends Construct {
     public readonly responseHeadersPolicy: cloudfront.ResponseHeadersPolicy;
     public readonly viewerRequestFunction: cloudfront.Function;
 
+    public get distributionId(): string {
+        return this.distribution.distributionId;
+    }
+
     constructor(scope: Construct, id: string, props: AngularSsrDistributionProps) {
         super(scope, id);
 
@@ -106,17 +173,26 @@ export class AngularSsrDistribution extends Construct {
             browserDistPath,
             lambdaEnv = {},
             lambdaMemorySize = 512,
+            lambdaRuntime = lambda.Runtime.NODEJS_22_X,
+            lambdaTimeout = cdk.Duration.seconds(30),
+            lambdaArchitecture = lambda.Architecture.ARM_64,
             webAdapterLayerArn,
             domainName,
             certificate,
             hostedZone,
+            redirectWwwToApex = true,
             additionalDomainNames = [],
             cachePolicyName,
             securityHeadersPolicyName,
             contentSecurityPolicy,
+            permissionsPolicy = DEFAULT_PERMISSIONS_POLICY,
+            frameOption = cloudfront.HeadersFrameOption.DENY,
+            allowedMethods = cloudfront.AllowedMethods.ALLOW_ALL,
+            cacheQueryStrings = true,
             additionalBehaviors = {},
             additionalStaticPatterns = [],
             priceClass = cloudfront.PriceClass.PRICE_CLASS_100,
+            bucketRemovalPolicy = cdk.RemovalPolicy.DESTROY,
         } = props;
 
         const stack = cdk.Stack.of(this);
@@ -127,25 +203,27 @@ export class AngularSsrDistribution extends Construct {
         }
 
         const aliasesEnabled = !!(domainName && certificate && hostedZone);
+        const wwwEnabled = aliasesEnabled && redirectWwwToApex;
 
         const resolvedCachePolicyName = cachePolicyName ?? `${stack.stackName}-${id}-Cache`;
         const resolvedHeadersPolicyName = securityHeadersPolicyName ?? `${stack.stackName}-${id}-SecurityHeaders`;
+        const lwaArch = lambdaArchitecture === lambda.Architecture.X86_64 ? 'X86_64' : 'Arm64';
         const resolvedLayerArn = webAdapterLayerArn
-            ?? `arn:aws:lambda:${stack.region}:753240598075:layer:LambdaAdapterLayerArm64:${DEFAULT_WEB_ADAPTER_LAYER_VERSION}`;
+            ?? `arn:aws:lambda:${stack.region}:753240598075:layer:LambdaAdapterLayer${lwaArch}:${DEFAULT_WEB_ADAPTER_LAYER_VERSION}`;
 
         this.assetsBucket = new s3.Bucket(this, 'AssetsBucket', {
-            removalPolicy: cdk.RemovalPolicy.DESTROY,
-            autoDeleteObjects: true,
+            removalPolicy: bucketRemovalPolicy,
+            autoDeleteObjects: bucketRemovalPolicy === cdk.RemovalPolicy.DESTROY,
             blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
         });
 
         this.ssrFunction = new lambda.Function(this, 'SsrFunction', {
-            runtime: lambda.Runtime.NODEJS_22_X,
+            runtime: lambdaRuntime,
             handler: 'run.sh',
             code: lambda.Code.fromAsset(serverDistPath),
             memorySize: lambdaMemorySize,
-            timeout: cdk.Duration.seconds(30),
-            architecture: lambda.Architecture.ARM_64,
+            timeout: lambdaTimeout,
+            architecture: lambdaArchitecture,
             environment: {
                 AWS_LAMBDA_EXEC_WRAPPER: '/opt/bootstrap',
                 PORT: '8080',
@@ -179,7 +257,7 @@ export class AngularSsrDistribution extends Construct {
                     },
                     contentTypeOptions: {override: true},
                     frameOptions: {
-                        frameOption: cloudfront.HeadersFrameOption.DENY,
+                        frameOption,
                         override: true,
                     },
                     referrerPolicy: {
@@ -187,25 +265,22 @@ export class AngularSsrDistribution extends Construct {
                             cloudfront.HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN,
                         override: true,
                     },
-                    xssProtection: {
-                        protection: true,
-                        modeBlock: true,
-                        override: true,
-                    },
                     contentSecurityPolicy: {
                         contentSecurityPolicy,
                         override: true,
                     },
                 },
-                customHeadersBehavior: {
-                    customHeaders: [
-                        {
-                            header: 'Permissions-Policy',
-                            value: 'camera=(), microphone=(), geolocation=(), interest-cohort=()',
-                            override: true,
-                        },
-                    ],
-                },
+                customHeadersBehavior: permissionsPolicy
+                    ? {
+                        customHeaders: [
+                            {
+                                header: 'Permissions-Policy',
+                                value: permissionsPolicy,
+                                override: true,
+                            },
+                        ],
+                    }
+                    : undefined,
             },
         );
 
@@ -218,7 +293,9 @@ export class AngularSsrDistribution extends Construct {
             defaultTtl: cdk.Duration.seconds(0),
             minTtl: cdk.Duration.seconds(0),
             maxTtl: cdk.Duration.days(1),
-            queryStringBehavior: cloudfront.CacheQueryStringBehavior.none(),
+            queryStringBehavior: cacheQueryStrings
+                ? cloudfront.CacheQueryStringBehavior.all()
+                : cloudfront.CacheQueryStringBehavior.none(),
             headerBehavior: cloudfront.CacheHeaderBehavior.none(),
             cookieBehavior: cloudfront.CacheCookieBehavior.none(),
             enableAcceptEncodingGzip: true,
@@ -227,10 +304,10 @@ export class AngularSsrDistribution extends Construct {
 
         this.viewerRequestFunction = new cloudfront.Function(this, 'ViewerRequestFunction', {
             runtime: cloudfront.FunctionRuntime.JS_2_0,
-            comment: aliasesEnabled
+            comment: wwwEnabled
                 ? `Inject x-forwarded-host; redirect www.${domainName} to apex`
                 : 'Inject x-forwarded-host for SSR base URL detection',
-            code: aliasesEnabled
+            code: wwwEnabled
                 ? hostHeaderWithWwwRedirectCode(domainName!)
                 : hostHeaderCode(),
         });
@@ -254,7 +331,7 @@ export class AngularSsrDistribution extends Construct {
         );
 
         const aliasDomains = aliasesEnabled
-            ? [domainName!, `www.${domainName}`, ...additionalDomainNames]
+            ? [domainName!, ...(wwwEnabled ? [`www.${domainName}`] : []), ...additionalDomainNames]
             : undefined;
 
         const resolvedAdditionalBehaviors = Object.fromEntries(
@@ -271,7 +348,7 @@ export class AngularSsrDistribution extends Construct {
                 cachePolicy: ssrCachePolicy,
                 originRequestPolicy:
                     cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
-                allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+                allowedMethods,
                 responseHeadersPolicy: this.responseHeadersPolicy,
                 functionAssociations,
             },
@@ -301,13 +378,15 @@ export class AngularSsrDistribution extends Construct {
                 ),
             });
 
-            new route53.ARecord(this, 'WwwAlias', {
-                zone: hostedZone!,
-                recordName: 'www',
-                target: route53.RecordTarget.fromAlias(
-                    new route53Targets.CloudFrontTarget(this.distribution),
-                ),
-            });
+            if (wwwEnabled) {
+                new route53.ARecord(this, 'WwwAlias', {
+                    zone: hostedZone!,
+                    recordName: 'www',
+                    target: route53.RecordTarget.fromAlias(
+                        new route53Targets.CloudFrontTarget(this.distribution),
+                    ),
+                });
+            }
 
             for (const extra of additionalDomainNames) {
                 const recordName = domainName && extra.endsWith(`.${domainName}`)

@@ -1,6 +1,6 @@
 {
   "name": "@davidsho/cdk-constructs",
-  "version": "1.3.0",
+  "version": "2.0.0",
   "description": "Shared CDK L3 constructs for Angular SSR deployments on AWS",
   "author": "David Shortland",
   "license": "MIT",
@@ -9,11 +9,28 @@
     "type": "git",
     "url": "https://github.com/davidsho/ds-cdk-constructs.git"
   },
+  "keywords": [
+    "cdk",
+    "aws-cdk",
+    "aws-cdk-lib",
+    "construct",
+    "angular",
+    "ssr",
+    "cloudfront",
+    "lambda",
+    "lambda-web-adapter",
+    "s3"
+  ],
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "files": [
-    "lib"
+    "lib",
+    "src",
+    "CHANGELOG.md"
   ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "npm run build"
