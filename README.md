@@ -2,13 +2,25 @@
 
 L3 CDK constructs for Angular SSR deployments on AWS.
 
+## Requirements
+
+- `aws-cdk-lib` >= 2.243.0
+- `constructs` >= 10.5.1
+
 ## Install
+
+Hosted on GitHub Packages. Add the following to your `.npmrc`:
+
+```
+@davidsho:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=YOUR_GITHUB_PAT
+```
+
+A GitHub Personal Access Token with `read:packages` scope is required. Then:
 
 ```bash
 npm install @davidsho/cdk-constructs
 ```
-
-Hosted on GitHub Packages. Configure your `.npmrc` to authenticate against `npm.pkg.github.com`.
 
 ## `AngularSsrDistribution`
 
