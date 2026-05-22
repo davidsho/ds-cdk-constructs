@@ -1,6 +1,6 @@
 {
   "name": "@davidsho/cdk-constructs",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Shared CDK L3 constructs for Angular SSR deployments on AWS",
   "author": "David Shortland",
   "license": "MIT",

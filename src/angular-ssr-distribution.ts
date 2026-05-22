@@ -371,33 +371,30 @@ export class AngularSsrDistribution extends Construct {
         });
 
         if (aliasesEnabled) {
+            const cfTarget = route53.RecordTarget.fromAlias(
+                new route53Targets.CloudFrontTarget(this.distribution),
+            );
+
             new route53.ARecord(this, 'ApexAlias', {
                 zone: hostedZone!,
-                target: route53.RecordTarget.fromAlias(
-                    new route53Targets.CloudFrontTarget(this.distribution),
-                ),
+                recordName: recordNameWithinZone(hostedZone!, domainName!),
+                target: cfTarget,
             });
 
             if (wwwEnabled) {
                 new route53.ARecord(this, 'WwwAlias', {
                     zone: hostedZone!,
-                    recordName: 'www',
-                    target: route53.RecordTarget.fromAlias(
-                        new route53Targets.CloudFrontTarget(this.distribution),
-                    ),
+                    recordName: recordNameWithinZone(hostedZone!, `www.${domainName}`),
+                    target: cfTarget,
                 });
             }
 
             for (const extra of additionalDomainNames) {
-                const recordName = domainName && extra.endsWith(`.${domainName}`)
-                    ? extra.slice(0, -1 - domainName.length)
-                    : extra;
-                new route53.ARecord(this, `ExtraAlias${recordName}`, {
+                const recordName = recordNameWithinZone(hostedZone!, extra);
+                new route53.ARecord(this, `ExtraAlias${extra.replace(/[^a-zA-Z0-9]/g, '')}`, {
                     zone: hostedZone!,
                     recordName,
-                    target: route53.RecordTarget.fromAlias(
-                        new route53Targets.CloudFrontTarget(this.distribution),
-                    ),
+                    target: cfTarget,
                 });
             }
         }
@@ -436,4 +433,30 @@ export class AngularSsrDistribution extends Construct {
             new cdk.CfnOutput(this, 'SiteUrl', {value: `https://${domainName}`});
         }
     }
+}
+
+/**
+ * Compute the record name to use for an `ARecord` whose fully-qualified target
+ * is `fqdn`, inside the given hosted zone. Returns `undefined` for the zone's
+ * apex, or the prefix portion for a subdomain.
+ *
+ * Used to support `domainName` values that are *subdomains* of the supplied
+ * `hostedZone` (e.g. `domainName = "status.example.com"` with
+ * `hostedZone = "example.com"`), as well as the previous behaviour where the
+ * `domainName` equalled the zone apex. Throws if the FQDN isn't inside the
+ * zone, which would otherwise silently create a record under the wrong name.
+ */
+function recordNameWithinZone(zone: route53.IHostedZone, fqdn: string): string | undefined {
+    const zoneName = zone.zoneName.replace(/\.$/, '').toLowerCase();
+    const name = fqdn.replace(/\.$/, '').toLowerCase();
+    if (name === zoneName) {
+        return undefined;
+    }
+    if (!name.endsWith(`.${zoneName}`)) {
+        throw new Error(
+            `Domain "${fqdn}" is not within hosted zone "${zoneName}". `
+            + `Pass a zone that contains the domain, or set domainName to a name inside the zone.`,
+        );
+    }
+    return name.slice(0, name.length - zoneName.length - 1);
 }

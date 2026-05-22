@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-05-22
+
+### Fixed
+- `AngularSsrDistribution` now creates its Route 53 alias records at the
+  correct name when `domainName` is a *subdomain* of the supplied
+  `hostedZone`. Previously the apex/www/extra `ARecord`s were always written
+  at the zone apex regardless of `domainName`, which collided with any
+  existing apex record (e.g. when adding a second app under the same hosted
+  zone). When `domainName` equals the zone apex the behaviour is unchanged.
+- A clearer error is thrown if `domainName` (or any entry in
+  `additionalDomainNames`) is not contained within the supplied `hostedZone`.
+
 ## [2.0.0] - 2026-05-21
 
 ### Added
