@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-08-23
+
+### Changed
+- With a custom domain attached, `AngularSsrDistribution` now 301s **every**
+  non-canonical host to the apex, not just `www`. The distribution's own
+  `*.cloudfront.net` name always resolves and cannot be switched off, so
+  previously the site stayed reachable at two addresses serving identical
+  HTML, each with a self-referencing canonical tag. Search engines read that
+  as duplicate content.
+
+  Canonical means the apex plus anything in `additionalDomainNames`; those
+  still serve directly. `www` continues to redirect exactly as before.
+
+  This is a behaviour change on upgrade: if you were reaching a deployment
+  through its CloudFront URL while a custom domain was attached, you will now
+  be redirected to the domain. Distributions with no custom domain are
+  unaffected, and the viewer-request function still only injects
+  `x-forwarded-host` for them, so the two-stage domain rollout (deploy with
+  `domainName` unset, attach aliases later) keeps working.
+
+  The redirect is gated on aliases being attached rather than on
+  `redirectWwwToApex`, so setting that to `false` no longer leaves the
+  CloudFront URL serving.
+
 ## [2.1.0] - 2026-05-22
 
 ### Fixed

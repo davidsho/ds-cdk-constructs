@@ -9,7 +9,7 @@ import * as route53Targets from 'aws-cdk-lib/aws-route53-targets';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import {Construct} from 'constructs';
-import {hostHeaderCode, hostHeaderWithWwwRedirectCode} from './viewer-request';
+import {hostHeaderCode, hostHeaderWithCanonicalRedirectCode} from './viewer-request';
 
 const DEFAULT_WEB_ADAPTER_LAYER_VERSION = 25;
 
@@ -302,13 +302,21 @@ export class AngularSsrDistribution extends Construct {
             enableAcceptEncodingBrotli: true,
         });
 
+        // Gated on aliasesEnabled, not wwwEnabled: with a custom domain
+        // attached, every non-canonical host redirects to the apex, whether or
+        // not www is in play. Without a custom domain there is nothing to
+        // redirect to, so the function only injects the header.
+        const canonicalHosts = aliasesEnabled
+            ? [domainName!, ...additionalDomainNames]
+            : [];
+
         this.viewerRequestFunction = new cloudfront.Function(this, 'ViewerRequestFunction', {
             runtime: cloudfront.FunctionRuntime.JS_2_0,
-            comment: wwwEnabled
-                ? `Inject x-forwarded-host; redirect www.${domainName} to apex`
+            comment: aliasesEnabled
+                ? `Inject x-forwarded-host; redirect non-canonical hosts to ${domainName}`
                 : 'Inject x-forwarded-host for SSR base URL detection',
-            code: wwwEnabled
-                ? hostHeaderWithWwwRedirectCode(domainName!)
+            code: aliasesEnabled
+                ? hostHeaderWithCanonicalRedirectCode(domainName!, canonicalHosts)
                 : hostHeaderCode(),
         });
 
