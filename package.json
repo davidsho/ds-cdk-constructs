@@ -1,7 +1,7 @@
 {
   "name": "@davidsho/cdk-constructs",
-  "version": "2.2.0",
-  "description": "Shared CDK L3 constructs for Angular SSR deployments on AWS",
+  "version": "2.3.0",
+  "description": "Shared CDK L3 constructs for Angular deployments on AWS, server-rendered or prerendered",
   "author": "David Shortland",
   "license": "MIT",
   "homepage": "https://github.com/davidsho/ds-cdk-constructs#readme",
@@ -19,7 +19,10 @@
     "cloudfront",
     "lambda",
     "lambda-web-adapter",
-    "s3"
+    "s3",
+    "static",
+    "prerender",
+    "cloudfront-functions"
   ],
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -33,15 +36,18 @@
   },
   "scripts": {
     "build": "tsc",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run test && npm run build",
+    "test": "ts-node --prefer-ts-exts test/static-viewer-request.test.ts && ts-node --prefer-ts-exts test/angular-static-distribution.test.ts"
   },
   "peerDependencies": {
     "aws-cdk-lib": "^2.243.0",
     "constructs": "^10.5.1"
   },
   "devDependencies": {
+    "@types/node": "^20.19.43",
     "aws-cdk-lib": "~2.253.0",
     "constructs": "^10.5.1",
+    "ts-node": "^10.9.2",
     "typescript": "~5.9.3"
   },
   "publishConfig": {

@@ -1,14 +1,28 @@
 import * as cdk from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as pipelines from 'aws-cdk-lib/pipelines';
-import {AngularSsrDistribution} from './angular-ssr-distribution';
 
+/**
+ * Structural type shared by every distribution construct in this package, so
+ * the step works with either without importing them and without instanceof.
+ */
+export interface InvalidatableDistribution {
+    readonly distributionIdOutput: cdk.CfnOutput;
+}
+
+/**
+ * Post-deploy step that invalidates the whole distribution.
+ *
+ * Blunt on purpose: fingerprinted assets are immutable and never need it, and
+ * everything else is HTML small enough that a full invalidation costs nothing
+ * against the monthly free allowance.
+ */
 export function invalidateCdnStep(
-    source: AngularSsrDistribution | cdk.CfnOutput,
+    source: InvalidatableDistribution | cdk.CfnOutput,
 ): pipelines.CodeBuildStep {
-    const distributionIdOutput = source instanceof AngularSsrDistribution
-        ? source.distributionIdOutput
-        : source;
+    const distributionIdOutput = source instanceof cdk.CfnOutput
+        ? source
+        : source.distributionIdOutput;
 
     return new pipelines.CodeBuildStep('InvalidateCdn', {
         commands: [

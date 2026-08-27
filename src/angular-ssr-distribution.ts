@@ -10,6 +10,7 @@ import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import {Construct} from 'constructs';
 import {hostHeaderCode, hostHeaderWithCanonicalRedirectCode} from './viewer-request';
+import {recordNameWithinZone} from './record-name';
 
 const DEFAULT_WEB_ADAPTER_LAYER_VERSION = 25;
 
@@ -443,28 +444,3 @@ export class AngularSsrDistribution extends Construct {
     }
 }
 
-/**
- * Compute the record name to use for an `ARecord` whose fully-qualified target
- * is `fqdn`, inside the given hosted zone. Returns `undefined` for the zone's
- * apex, or the prefix portion for a subdomain.
- *
- * Used to support `domainName` values that are *subdomains* of the supplied
- * `hostedZone` (e.g. `domainName = "status.example.com"` with
- * `hostedZone = "example.com"`), as well as the previous behaviour where the
- * `domainName` equalled the zone apex. Throws if the FQDN isn't inside the
- * zone, which would otherwise silently create a record under the wrong name.
- */
-function recordNameWithinZone(zone: route53.IHostedZone, fqdn: string): string | undefined {
-    const zoneName = zone.zoneName.replace(/\.$/, '').toLowerCase();
-    const name = fqdn.replace(/\.$/, '').toLowerCase();
-    if (name === zoneName) {
-        return undefined;
-    }
-    if (!name.endsWith(`.${zoneName}`)) {
-        throw new Error(
-            `Domain "${fqdn}" is not within hosted zone "${zoneName}". `
-            + `Pass a zone that contains the domain, or set domainName to a name inside the zone.`,
-        );
-    }
-    return name.slice(0, name.length - zoneName.length - 1);
-}

@@ -5,6 +5,37 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-08-27
+
+### Added
+- `AngularStaticDistribution`: a prerendered Angular site on S3 behind
+  CloudFront with no origin compute. The sibling of `AngularSsrDistribution`,
+  for the common case where every route is `RenderMode.Prerender` and the SSR
+  Lambda is doing nothing but re-serving HTML that was baked at build time.
+
+  The three jobs the SSR server was still doing for such an app move to the
+  edge: a viewer-request function resolves directory indexes and serves legacy
+  301s from a build-generated manifest, and a pair of custom error responses
+  map S3's 403 and 404 to a prerendered 404 page with a real `404` status.
+
+  The manifest is baked into the function source, so the construct throws at
+  synth time when it would push the function past CloudFront's 10 KB inline
+  limit rather than letting the deploy fail.
+
+- `buildStaticViewerRequestCode` and `readRedirectManifest`, exported so the
+  function body can be unit tested and the manifest read from a build output.
+
+### Changed
+- `invalidateCdnStep` now accepts either distribution construct, via the
+  `InvalidatableDistribution` structural type, instead of testing for
+  `AngularSsrDistribution` with `instanceof`. Existing calls are unaffected.
+- `recordNameWithinZone` is shared between both constructs rather than
+  duplicated. No behaviour change.
+
+### Fixed
+- Added the missing `@types/node` devDependency. The package compiled only
+  because consumers happened to supply the types.
+
 ## [2.2.0] - 2026-08-23
 
 ### Changed
