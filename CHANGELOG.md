@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-10-23
+
+### Added
+- `basicAuth` on `AngularStaticDistribution`: puts every path behind HTTP
+  basic auth, for private preview and staging copies of a site. Takes
+  `user:password` pairs, one per reader, and bakes only their SHA-256 digests
+  into the viewer-request function, so no password reaches the template or the
+  console. The check runs before the cache and after the canonical-host
+  redirect, so a visitor is asked to log in once, on the canonical host.
+- `noIndex` on `AngularStaticDistribution`: adds
+  `X-Robots-Tag: noindex, nofollow` to every response.
+- `hashBasicAuthCredential` and a `basicAuth` option on
+  `buildStaticViewerRequestCode`, for callers building the function directly.
+
+Both options are off by default. With them off, the viewer-request function and
+the response headers policy are byte-for-byte what 2.3.0 produced, so upgrading
+does not redeploy either. The tests pin this against fixtures captured from
+2.3.0.
+
 ## [2.3.0] - 2026-08-27
 
 ### Added

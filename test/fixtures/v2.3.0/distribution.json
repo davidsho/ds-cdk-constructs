@@ -1,0 +1,52 @@
+{
+  "function": [
+    {
+      "AutoPublish": true,
+      "FunctionCode": "var REDIRECTS = {\"/blog/old\":\"/writing/old\"};\nvar CANONICAL_HOSTS = [\"example.com\"];\n\nfunction querystring(request) {\n    var parts = [];\n    for (var key in request.querystring) {\n        var value = request.querystring[key];\n        if (value && value.multiValue) {\n            for (var i = 0; i < value.multiValue.length; i++) {\n                parts.push(key + '=' + value.multiValue[i].value);\n            }\n        } else if (value && value.value !== undefined) {\n            parts.push(key + '=' + value.value);\n        }\n    }\n    return parts.length > 0 ? '?' + parts.join('&') : '';\n}\n\nfunction permanentRedirect(location) {\n    return {\n        statusCode: 301,\n        statusDescription: 'Moved Permanently',\n        headers: {\n            'location': { value: location },\n            'cache-control': { value: 'max-age=3600' }\n        }\n    };\n}\n\nfunction legacyTarget(uri) {\n    var target = null;\n    if (REDIRECTS[uri]) {\n        target = REDIRECTS[uri];\n    } else if (uri.charAt(uri.length - 1) !== '/' && REDIRECTS[uri + '/']) {\n        target = REDIRECTS[uri + '/'];\n    } else if (uri.length > 1 && uri.charAt(uri.length - 1) === '/') {\n        var trimmed = uri.slice(0, -1);\n        if (REDIRECTS[trimmed]) {\n            target = REDIRECTS[trimmed];\n        }\n    }\n    return target === uri ? null : target;\n}\n\nfunction handler(event) {\n    var request = event.request;\n    var uri = request.uri;\n\n    var host = request.headers.host ? request.headers.host.value.toLowerCase() : '';\n    if (host && CANONICAL_HOSTS.indexOf(host) === -1) {\n        return permanentRedirect('https://example.com' + uri + querystring(request));\n    }\n\n    var target = legacyTarget(uri);\n    if (target) {\n        return permanentRedirect(target + querystring(request));\n    }\n\n    if (uri.charAt(uri.length - 1) === '/') {\n        request.uri = uri + 'index.html';\n        return request;\n    }\n\n    var lastSegment = uri.slice(uri.lastIndexOf('/') + 1);\n    if (lastSegment.indexOf('.') === -1) {\n        request.uri = uri + '/index.html';\n    }\n\n    return request;\n}\n",
+      "FunctionConfig": {
+        "Comment": "Resolve directory indexes; redirect legacy URLs and non-canonical hosts to example.com",
+        "Runtime": "cloudfront-js-2.0"
+      },
+      "Name": "eu-west-2TestStackWebViewerRequestFunction45B78D19"
+    }
+  ],
+  "responseHeadersPolicy": [
+    {
+      "ResponseHeadersPolicyConfig": {
+        "CustomHeadersConfig": {
+          "Items": [
+            {
+              "Header": "Permissions-Policy",
+              "Override": true,
+              "Value": "camera=(), microphone=(), geolocation=()"
+            }
+          ]
+        },
+        "Name": "TestStack-Web-SecurityHeaders",
+        "SecurityHeadersConfig": {
+          "ContentSecurityPolicy": {
+            "ContentSecurityPolicy": "default-src 'self'",
+            "Override": true
+          },
+          "ContentTypeOptions": {
+            "Override": true
+          },
+          "FrameOptions": {
+            "FrameOption": "DENY",
+            "Override": true
+          },
+          "ReferrerPolicy": {
+            "Override": true,
+            "ReferrerPolicy": "strict-origin-when-cross-origin"
+          },
+          "StrictTransportSecurity": {
+            "AccessControlMaxAgeSec": 31536000,
+            "IncludeSubdomains": true,
+            "Override": true,
+            "Preload": true
+          }
+        }
+      }
+    }
+  ]
+}

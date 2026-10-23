@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -31,6 +32,39 @@ export interface StaticViewerRequestOptions {
      * identical HTML and search engines see duplicate content.
      */
     readonly canonicalHosts?: readonly string[];
+
+    /**
+     * Challenge every request for HTTP basic auth before anything else is
+     * served. Omit for a public site; when omitted the function is unchanged.
+     */
+    readonly basicAuth?: StaticViewerRequestBasicAuth;
+}
+
+export interface StaticViewerRequestBasicAuth {
+    /**
+     * Hex SHA-256 digests of the token a browser sends after `Basic `, one per
+     * accepted login. Produce them with `hashBasicAuthCredential`. Only the
+     * digest is baked into the function, so the console and the synthesised
+     * template never show a password.
+     */
+    readonly credentialHashes: readonly string[];
+
+    /** Shown by some browsers in the login prompt. Defaults to 'Restricted'. */
+    readonly realm?: string;
+}
+
+const DEFAULT_REALM = 'Restricted';
+
+/**
+ * Digest of a `user:password` pair as the viewer request function compares
+ * it: SHA-256 of the base64 token the browser puts in the Authorization
+ * header. Hashing the token rather than decoding it keeps the function free of
+ * base64 handling, and the encoding is canonical, so every client produces the
+ * same token for the same pair.
+ */
+export function hashBasicAuthCredential(credential: string): string {
+    const token = Buffer.from(credential, 'utf8').toString('base64');
+    return crypto.createHash('sha256').update(token).digest('hex');
 }
 
 /**
@@ -61,7 +95,7 @@ export function readRedirectManifest(manifestPath: string): Record<string, strin
  * root object, so without the rewrite every nested route 404s.
  */
 export function buildStaticViewerRequestCode(options: StaticViewerRequestOptions): string {
-    const {redirects = {}, apexDomain, canonicalHosts} = options;
+    const {redirects = {}, apexDomain, canonicalHosts, basicAuth} = options;
 
     if (canonicalHosts?.length && !apexDomain) {
         throw new Error('canonicalHosts requires apexDomain: there is nothing to redirect to');
@@ -79,7 +113,15 @@ export function buildStaticViewerRequestCode(options: StaticViewerRequestOptions
 `
         : '';
 
-    const code = `var REDIRECTS = ${JSON.stringify(redirects)};
+    // Every basic auth fragment is empty when it is off, so a public site's
+    // function is byte-for-byte what it was before the option existed and
+    // upgrading does not redeploy it.
+    const auth = basicAuth ? basicAuthFragments(basicAuth) : {globals: '', functions: '', check: ''};
+
+    // The auth check sits after the host redirect so a visitor on www or the
+    // CloudFront name is sent to the canonical host first and asked to log in
+    // once, there, rather than once per host.
+    const code = `${auth.globals}var REDIRECTS = ${JSON.stringify(redirects)};
 var CANONICAL_HOSTS = ${JSON.stringify(hosts)};
 
 function querystring(request) {
@@ -108,7 +150,7 @@ function permanentRedirect(location) {
     };
 }
 
-function legacyTarget(uri) {
+${auth.functions}function legacyTarget(uri) {
     var target = null;
     if (REDIRECTS[uri]) {
         target = REDIRECTS[uri];
@@ -126,7 +168,7 @@ function legacyTarget(uri) {
 function handler(event) {
     var request = event.request;
     var uri = request.uri;
-${canonicalHostRedirect}
+${canonicalHostRedirect}${auth.check}
     var target = legacyTarget(uri);
     if (target) {
         return permanentRedirect(target + querystring(request));
@@ -156,4 +198,65 @@ ${canonicalHostRedirect}
     }
 
     return code;
+}
+
+function basicAuthFragments(basicAuth: StaticViewerRequestBasicAuth): {
+    globals: string;
+    functions: string;
+    check: string;
+} {
+    const {credentialHashes, realm = DEFAULT_REALM} = basicAuth;
+
+    if (credentialHashes.length === 0) {
+        throw new Error('basicAuth needs at least one credential hash, or nobody can get in');
+    }
+    for (const hash of credentialHashes) {
+        if (!/^[0-9a-f]{64}$/.test(hash)) {
+            throw new Error(
+                'basicAuth credentialHashes must be hex SHA-256 digests from hashBasicAuthCredential, '
+                + 'not the credentials themselves',
+            );
+        }
+    }
+    if (!/^[\x20-\x7e]*$/.test(realm) || /["\\]/.test(realm)) {
+        throw new Error('basicAuth realm must be printable ASCII without quotes or backslashes');
+    }
+
+    const challenge = `Basic realm="${realm}", charset="UTF-8"`;
+
+    return {
+        globals: `var crypto = require('crypto');
+var CREDENTIAL_HASHES = ${JSON.stringify(credentialHashes)};
+`,
+        functions: `function authorised(request) {
+    var header = request.headers.authorization;
+    if (!header) {
+        return false;
+    }
+    var match = header.value.match(/^basic\\s+(\\S+)\\s*$/i);
+    if (!match) {
+        return false;
+    }
+    var digest = crypto.createHash('sha256').update(match[1]).digest('hex');
+    return CREDENTIAL_HASHES.indexOf(digest) !== -1;
+}
+
+function unauthorised() {
+    return {
+        statusCode: 401,
+        statusDescription: 'Unauthorized',
+        headers: {
+            'www-authenticate': { value: ${JSON.stringify(challenge)} },
+            'cache-control': { value: 'no-store' }
+        }
+    };
+}
+
+`,
+        check: `
+    if (!authorised(request)) {
+        return unauthorised();
+    }
+`,
+    };
 }

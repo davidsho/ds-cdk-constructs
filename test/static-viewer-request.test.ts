@@ -1,6 +1,9 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import {
     FUNCTION_SIZE_LIMIT_BYTES,
     buildStaticViewerRequestCode,
+    hashBasicAuthCredential,
 } from '../src/static-viewer-request';
 
 const APEX = 'example.com';
@@ -30,9 +33,13 @@ type ViewerResult = {
     headers?: Record<string, {value: string}>;
 };
 
+const GOLDEN = path.join(__dirname, 'fixtures', 'v2.3.0');
+
 function load(options: Parameters<typeof buildStaticViewerRequestCode>[0]) {
     const code = buildStaticViewerRequestCode(options);
-    const handler = new Function(`${code}; return handler;`)() as (e: ViewerEvent) => ViewerResult;
+    // CloudFront Functions provide require() for the crypto module; Node's is
+    // API-compatible for the createHash calls the basic auth check makes.
+    const handler = new Function('require', `${code}; return handler;`)(require) as (e: ViewerEvent) => ViewerResult;
     return {handler, size: Buffer.byteLength(code, 'utf8')};
 }
 
@@ -40,8 +47,17 @@ function event(
     uri: string,
     host = APEX,
     querystring: ViewerEvent['request']['querystring'] = {},
+    authorization?: string,
 ): ViewerEvent {
-    return {request: {uri, querystring, headers: {host: {value: host}}}};
+    const headers: ViewerEvent['request']['headers'] = {host: {value: host}};
+    if (authorization !== undefined) {
+        headers.authorization = {value: authorization};
+    }
+    return {request: {uri, querystring, headers}};
+}
+
+function basic(credential: string): string {
+    return `Basic ${Buffer.from(credential, 'utf8').toString('base64')}`;
 }
 
 let failures = 0;
@@ -131,6 +147,82 @@ check(
 check('a missing host header does not redirect', withApex.handler({request: {uri: '/about', querystring: {}, headers: {}}}).uri, '/about/index.html');
 check('an additional canonical host serves the site', withExtra.handler(event('/about', `members.${APEX}`)).uri, '/about/index.html');
 check('a non-canonical host still redirects when extras are configured', redirect(withExtra.handler(event('/about', CLOUDFRONT_HOST))), [301, `https://${APEX}/about`]);
+
+// ── basic auth ──────────────────────────────────────────────────────────
+const READERS = ['david:correct horse', 'reviewer:pa:ss:word'];
+const guarded = load({
+    redirects: REDIRECTS,
+    apexDomain: APEX,
+    canonicalHosts: [APEX],
+    basicAuth: {credentialHashes: READERS.map(hashBasicAuthCredential), realm: 'Preview'},
+});
+
+check(
+    'the digest is sha256 of the base64 token (independent reference value)',
+    hashBasicAuthCredential('user:pass'),
+    '0e9d220616f08345a714ee57d8516310770588484b5239844635f952965e34a6',
+);
+check('no credentials are challenged', guarded.handler(event('/about')).statusCode, 401);
+check(
+    'the challenge names the realm and asks for UTF-8',
+    guarded.handler(event('/about')).headers?.['www-authenticate'].value,
+    'Basic realm="Preview", charset="UTF-8"',
+);
+check('the challenge is never cached', guarded.handler(event('/about')).headers?.['cache-control'].value, 'no-store');
+check('the right credentials are let through', guarded.handler(event('/about', APEX, {}, basic(READERS[0]))).uri, '/about/index.html');
+check('every listed reader is let through', guarded.handler(event('/', APEX, {}, basic(READERS[1]))).uri, '/index.html');
+check('the scheme is case insensitive', guarded.handler(event('/', APEX, {}, basic(READERS[0]).replace('Basic', 'basic'))).uri, '/index.html');
+check('a wrong password is challenged', guarded.handler(event('/about', APEX, {}, basic('david:wrong'))).statusCode, 401);
+check('an unknown user is challenged', guarded.handler(event('/about', APEX, {}, basic('someone:correct horse'))).statusCode, 401);
+check('a non-basic scheme is challenged', guarded.handler(event('/about', APEX, {}, 'Bearer abc')).statusCode, 401);
+check('an empty authorization header is challenged', guarded.handler(event('/about', APEX, {}, '')).statusCode, 401);
+check('assets are guarded as well as pages', guarded.handler(event('/main-NLRD5BCZ.js')).statusCode, 401);
+check('legacy redirects are not served before login', guarded.handler(event('/contact-us/')).statusCode, 401);
+check(
+    'legacy redirects still work after login',
+    redirect(guarded.handler(event('/contact-us/', APEX, {}, basic(READERS[0])))),
+    [301, '/contact'],
+);
+check(
+    'non-canonical hosts redirect before the challenge, so the login is asked for once',
+    redirect(guarded.handler(event('/about', `www.${APEX}`))),
+    [301, `https://${APEX}/about`],
+);
+check(
+    'basic auth works without a custom domain',
+    load({basicAuth: {credentialHashes: [hashBasicAuthCredential(READERS[0])]}}).handler(event('/about', CLOUDFRONT_HOST)).statusCode,
+    401,
+);
+check(
+    'the realm defaults to Restricted',
+    load({basicAuth: {credentialHashes: [hashBasicAuthCredential(READERS[0])]}}).handler(event('/')).headers?.['www-authenticate'].value,
+    'Basic realm="Restricted", charset="UTF-8"',
+);
+check('the function never contains a password', buildStaticViewerRequestCode({
+    basicAuth: {credentialHashes: READERS.map(hashBasicAuthCredential)},
+}).includes('correct horse'), false);
+check(`guarded function is within the ${FUNCTION_SIZE_LIMIT_BYTES} byte limit (${guarded.size} bytes)`, guarded.size <= FUNCTION_SIZE_LIMIT_BYTES, true);
+throws('an empty credential list is rejected', () => buildStaticViewerRequestCode({basicAuth: {credentialHashes: []}}));
+throws('a plaintext credential in place of a hash is rejected', () => buildStaticViewerRequestCode({
+    basicAuth: {credentialHashes: ['david:correct horse']},
+}));
+throws('a realm that would break the header is rejected', () => buildStaticViewerRequestCode({
+    basicAuth: {credentialHashes: [hashBasicAuthCredential(READERS[0])], realm: 'a"b'},
+}));
+
+// ── unchanged for existing consumers ────────────────────────────────────
+// Byte-for-byte against what 2.3.0 generated. A difference here redeploys the
+// function of every site that upgrades, so it has to be deliberate.
+check(
+    'output without the new options matches 2.3.0 (no domain)',
+    buildStaticViewerRequestCode({redirects: REDIRECTS}),
+    fs.readFileSync(path.join(GOLDEN, 'viewer-request-plain.js'), 'utf8'),
+);
+check(
+    'output without the new options matches 2.3.0 (canonical hosts)',
+    buildStaticViewerRequestCode({redirects: REDIRECTS, apexDomain: APEX, canonicalHosts: [APEX, `members.${APEX}`]}),
+    fs.readFileSync(path.join(GOLDEN, 'viewer-request-apex.js'), 'utf8'),
+);
 
 // ── synth-time guards ───────────────────────────────────────────────────
 check(`function is within the ${FUNCTION_SIZE_LIMIT_BYTES} byte limit (${withApex.size} bytes)`, withApex.size <= FUNCTION_SIZE_LIMIT_BYTES, true);
