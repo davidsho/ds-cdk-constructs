@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import * as path from 'path';
 import * as cdk from 'aws-cdk-lib';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
@@ -182,6 +183,84 @@ check('drops www entirely when redirectWwwToApex is false', () => {
 });
 
 throws('rejects a partial domain configuration', () => synth({certificate: undefined}));
+
+// ── unchanged for existing consumers ────────────────────────────────────
+// What 2.3.0 synthesised for the default configuration. The new options are
+// off by default, so an upgrade must not touch the function or the headers.
+const golden = JSON.parse(
+    fs.readFileSync(path.join(__dirname, 'fixtures', 'v2.3.0', 'distribution.json'), 'utf8'),
+);
+
+function propertiesOf(t: Template, type: string): unknown[] {
+    return Object.values(t.findResources(type)).map((r) => (r as {Properties: unknown}).Properties);
+}
+
+check('the viewer request function is unchanged from 2.3.0 by default', () => {
+    const actual = JSON.stringify(propertiesOf(template, 'AWS::CloudFront::Function'));
+    if (actual !== JSON.stringify(golden.function)) {
+        throw new Error('function properties differ from test/fixtures/v2.3.0/distribution.json');
+    }
+});
+
+check('the response headers policy is unchanged from 2.3.0 by default', () => {
+    const actual = JSON.stringify(propertiesOf(template, 'AWS::CloudFront::ResponseHeadersPolicy'));
+    if (actual !== JSON.stringify(golden.responseHeadersPolicy)) {
+        throw new Error('response headers policy differs from test/fixtures/v2.3.0/distribution.json');
+    }
+});
+
+// ── basic auth and noindex ──────────────────────────────────────────────
+const preview = synth({
+    domainName: `preview.${APEX}`,
+    redirectWwwToApex: false,
+    basicAuth: {credentials: ['david:correct horse', 'reviewer:other'], realm: 'Preview'},
+    noIndex: true,
+});
+
+check('bakes credential digests into the function', () => {
+    preview.hasResourceProperties('AWS::CloudFront::Function', {
+        FunctionCode: Match.stringLikeRegexp('CREDENTIAL_HASHES = \\["[0-9a-f]{64}","[0-9a-f]{64}"\\]'),
+    });
+});
+
+check('never puts a password in the template', () => {
+    if (JSON.stringify(preview.toJSON()).includes('correct horse')) {
+        throw new Error('plaintext credential found in the synthesised template');
+    }
+});
+
+check('sends X-Robots-Tag alongside Permissions-Policy when noIndex is set', () => {
+    preview.hasResourceProperties('AWS::CloudFront::ResponseHeadersPolicy', {
+        ResponseHeadersPolicyConfig: Match.objectLike({
+            CustomHeadersConfig: {
+                Items: [
+                    Match.objectLike({Header: 'Permissions-Policy'}),
+                    {Header: 'X-Robots-Tag', Value: 'noindex, nofollow', Override: true},
+                ],
+            },
+        }),
+    });
+});
+
+check('sends X-Robots-Tag alone when the permissions policy is switched off', () => {
+    synth({permissionsPolicy: '', noIndex: true}).hasResourceProperties('AWS::CloudFront::ResponseHeadersPolicy', {
+        ResponseHeadersPolicyConfig: Match.objectLike({
+            CustomHeadersConfig: {Items: [Match.objectLike({Header: 'X-Robots-Tag'})]},
+        }),
+    });
+});
+
+check('serves a subdomain without www records', () => {
+    preview.resourceCountIs('AWS::Route53::RecordSet', 2);
+});
+
+throws('rejects a credential without a password', () => synth({basicAuth: {credentials: ['david:']}}));
+throws('rejects a credential without a username', () => synth({basicAuth: {credentials: [':secret']}}));
+throws('rejects a credential with no separator', () => synth({basicAuth: {credentials: ['davidsecret']}}));
+throws('rejects an empty credential list', () => synth({basicAuth: {credentials: []}}));
+throws('rejects a credential that is a CloudFormation reference', () => synth({
+    basicAuth: {credentials: [cdk.Fn.importValue('PreviewCredential')]},
+}));
 
 console.log('');
 if (failures > 0) {

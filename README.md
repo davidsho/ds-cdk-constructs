@@ -104,6 +104,41 @@ Three `BucketDeployment` passes claim slices of the output by pattern:
 destination scan as well as the source, so the passes do not delete each other's
 objects.
 
+### Private previews
+
+`basicAuth` puts every path behind HTTP basic auth, for a preview or staging
+copy of a site that a few people need to read before it goes public. `noIndex`
+adds `X-Robots-Tag: noindex, nofollow` so that copy never turns up in search.
+Both are off by default, and with them off the function and headers are exactly
+what 2.3.0 produced.
+
+```ts
+new AngularStaticDistribution(this, 'Web', {
+    // ...as above, with the preview's own domain and certificate
+    domainName: 'preview.example.com',
+    redirectWwwToApex: false,
+
+    // One "user:password" per reader, read from SSM or Secrets Manager in the
+    // synth step. Concrete strings only: a CloudFormation reference is rejected.
+    basicAuth: {
+        credentials: process.env.PREVIEW_BASIC_AUTH!.split('\n'),
+        realm: 'Preview',
+    },
+    noIndex: true,
+});
+```
+
+The check runs in the viewer-request function, before the cache, so a page one
+reader has loaded is never served from cache to someone who has not logged in.
+Non-canonical hosts are redirected first, so a visitor arriving on the
+CloudFront name is asked to log in once, on the canonical host.
+
+Only a SHA-256 digest of each credential is baked into the function, so the
+console and the synthesised template never show a password. The digests are
+unsalted, so use long random passwords. Rotating one means changing the stored
+value and redeploying. This is a shared secret per reader over HTTPS, good for
+keeping drafts out of public view, not real access control.
+
 ## `AngularSsrDistribution`
 
 A single CloudFront distribution that fronts:

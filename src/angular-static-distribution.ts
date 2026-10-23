@@ -7,7 +7,7 @@ import * as route53Targets from 'aws-cdk-lib/aws-route53-targets';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import {Construct} from 'constructs';
-import {buildStaticViewerRequestCode} from './static-viewer-request';
+import {buildStaticViewerRequestCode, hashBasicAuthCredential} from './static-viewer-request';
 import {recordNameWithinZone} from './record-name';
 
 const DEFAULT_IMMUTABLE_PATTERNS = ['*.js', '*.css', '*.woff2'];
@@ -19,6 +19,22 @@ const DEFAULT_DOCUMENT_CACHE_CONTROL = 'public, max-age=0, must-revalidate';
 const IMMUTABLE_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 const DEFAULT_PERMISSIONS_POLICY = 'camera=(), microphone=(), geolocation=()';
 const DEFAULT_NOT_FOUND_PAGE_PATH = '/404/index.html';
+const NO_INDEX_ROBOTS_TAG = 'noindex, nofollow';
+
+export interface AngularStaticDistributionBasicAuth {
+    /**
+     * Accepted logins, each as `user:password`. The password may contain
+     * colons; the username may not. They must be concrete strings at synth
+     * time, since only their SHA-256 digests are baked into the function: read
+     * them from SSM or Secrets Manager in the synth step rather than passing a
+     * CloudFormation reference, which cannot be hashed. Give each reader their
+     * own entry and one can be revoked without changing the others.
+     */
+    credentials: string[];
+
+    /** Shown by some browsers in the login prompt. Defaults to 'Restricted'. */
+    realm?: string;
+}
 
 export interface AngularStaticDistributionProps {
     /**
@@ -130,6 +146,22 @@ export interface AngularStaticDistributionProps {
 
     /** Defaults to PRICE_CLASS_100 (North America and Europe). */
     priceClass?: cloudfront.PriceClass;
+
+    /**
+     * Put every path behind HTTP basic auth, checked in the viewer-request
+     * function before the cache, so a cached page is never served to a
+     * visitor who has not logged in. Meant for preview and staging copies of
+     * a site: one shared secret per reader over HTTPS, not real access
+     * control. Omit for a public site.
+     */
+    basicAuth?: AngularStaticDistributionBasicAuth;
+
+    /**
+     * Send `X-Robots-Tag: noindex, nofollow` on every response, so a copy of
+     * the site that is reachable by anyone who knows its URL never competes
+     * with the real one in search results. Defaults to false.
+     */
+    noIndex?: boolean;
 }
 
 /**
@@ -185,6 +217,8 @@ export class AngularStaticDistribution extends Construct {
             bucketName,
             bucketRemovalPolicy = cdk.RemovalPolicy.DESTROY,
             priceClass = cloudfront.PriceClass.PRICE_CLASS_100,
+            basicAuth,
+            noIndex = false,
         } = props;
 
         const stack = cdk.Stack.of(this);
@@ -221,9 +255,21 @@ export class AngularStaticDistribution extends Construct {
                     redirects,
                     apexDomain: aliasesEnabled ? domainName : undefined,
                     canonicalHosts: aliasesEnabled ? [domainName!, ...additionalDomainNames] : undefined,
+                    basicAuth: basicAuth && {
+                        credentialHashes: basicAuth.credentials.map(hashCredential),
+                        realm: basicAuth.realm,
+                    },
                 }),
             ),
         });
+
+        const customHeaders: cloudfront.ResponseCustomHeader[] = [];
+        if (permissionsPolicy) {
+            customHeaders.push({header: 'Permissions-Policy', value: permissionsPolicy, override: true});
+        }
+        if (noIndex) {
+            customHeaders.push({header: 'X-Robots-Tag', value: NO_INDEX_ROBOTS_TAG, override: true});
+        }
 
         this.responseHeadersPolicy = new cloudfront.ResponseHeadersPolicy(this, 'SecurityHeadersPolicy', {
             responseHeadersPolicyName: resolvedHeadersPolicyName,
@@ -242,13 +288,7 @@ export class AngularStaticDistribution extends Construct {
                 },
                 contentSecurityPolicy: {contentSecurityPolicy, override: true},
             },
-            customHeadersBehavior: permissionsPolicy
-                ? {
-                    customHeaders: [
-                        {header: 'Permissions-Policy', value: permissionsPolicy, override: true},
-                    ],
-                }
-                : undefined,
+            customHeadersBehavior: customHeaders.length > 0 ? {customHeaders} : undefined,
         });
 
         const functionAssociations: cloudfront.FunctionAssociation[] = [{
@@ -388,3 +428,16 @@ export class AngularStaticDistribution extends Construct {
     }
 }
 
+function hashCredential(credential: string): string {
+    if (cdk.Token.isUnresolved(credential)) {
+        throw new Error(
+            'basicAuth credentials must be concrete strings at synth time. A CloudFormation '
+            + 'reference cannot be hashed; read the value in the synth step instead.',
+        );
+    }
+    const separator = credential.indexOf(':');
+    if (separator < 1 || separator === credential.length - 1) {
+        throw new Error('basicAuth credentials must be "user:password" with both parts non-empty');
+    }
+    return hashBasicAuthCredential(credential);
+}
